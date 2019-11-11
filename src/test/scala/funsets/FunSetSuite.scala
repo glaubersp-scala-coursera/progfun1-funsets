@@ -1,95 +1,29 @@
 package funsets
 
-import funsets.FunSets.toString
-import org.scalatest.FunSuite
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
+import org.junit._
 
 /**
-  * This class is a test suite for the methods in object FunSets. To run
-  * the test suite, you can either:
-  *  - run the "test" command in the SBT console
-  *  - right-click the file in eclipse and chose "Run As" - "JUnit Test"
+  * This class is a test suite for the methods in object FunSets.
+  *
+  * To run this test suite, start "sbt" then run the "test" command.
   */
-@RunWith(classOf[JUnitRunner])
-class FunSetSuite extends FunSuite {
-
-  /**
-    * Link to the scaladoc - very clear and detailed tutorial of FunSuite
-    *
-    * http://doc.scalatest.org/1.9.1/index.html#org.scalatest.FunSuite
-    *
-    * Operators
-    *  - test
-    *  - ignore
-    *  - pending
-    */
-  /**
-    * Tests are written using the "test" operator and the "assert" method.
-    */
-  // test("string take") {
-  //   val message = "hello, world"
-  //   assert(message.take(5) == "hello")
-  // }
-
-  /**
-    * For ScalaTest tests, there exists a special equality operator "===" that
-    * can be used inside "assert". If the assertion fails, the two values will
-    * be printed in the error message. Otherwise, when using "==", the test
-    * error message will only say "assertion failed", without showing the values.
-    *
-    * Try it out! Change the values so that the assertion fails, and look at the
-    * error message.
-    */
-  // test("adding ints") {
-  //   assert(1 + 2 === 3)
-  // }
+class FunSetSuite {
 
   import FunSets._
 
-  test("contains is implemented") {
+  @Test def `contains is implemented`: Unit = {
     assert(contains(x => true, 100))
   }
 
   /**
-    * When writing tests, one would often like to re-use certain values for multiple
-    * tests. For instance, we would like to create an Int-set and have multiple test
-    * about it.
-    *
-    * Instead of copy-pasting the code for creating the set into every test, we can
-    * store it in the test class using a val:
-    *
-    *   val s1 = singletonSet(1)
-    *
-    * However, what happens if the method "singletonSet" has a bug and crashes? Then
-    * the test methods are not even executed, because creating an instance of the
-    * test class fails!
-    *
-    * Therefore, we put the shared values into a separate trait (traits are like
-    * abstract classes), and create an instance inside each test method.
-    *
-    */
-  trait TestSets {
-    val s1: Set = singletonSet(1)
-    val s2: Set = singletonSet(2)
-    val s3: Set = singletonSet(3)
-    val sEven: Set = (elem: Int) => 2 to 10 by 2 contains elem
-    val sOdd: Set = (elem: Int) => 1 to 10 by 2 contains elem
-    val sEvenWithOneOdd: Set = (elem: Int) => (elem == 1) || (2 to 10 by 2 contains elem)
-    val sOddWithOneEven: Set = (elem: Int) => (elem == 2) || (1 to 10 by 2 contains elem)
-    val sEvenDuplicated: Set = (elem: Int) => (2 to 10 by 2) map (x => x * 2) contains elem
-    val sOddDuplicated: Set = (elem: Int) => (1 to 10 by 2) map (x => x * 2) contains elem
-    val notLessThanFive = (elem: Int) => ((1 to 7 by 2 contains elem) || (elem == 1000))
-  }
-
-  /**
-    * This test is currently disabled (by using "ignore") because the method
+    * This test is currently disabled (by using @Ignore) because the method
     * "singletonSet" is not yet implemented and the test would fail.
     *
-    * Once you finish your implementation of "singletonSet", exchange the
-    * function "ignore" by "test".
+    * Once you finish your implementation of "singletonSet", remvoe the
+    *
+    * @Ignore annotation.
     */
-  test("singletonSet(1) contains 1") {
+  @Test def `singleton set one contains one`: Unit = {
 
     /**
       * We create a new instance of the "TestSets" trait, this gives us access
@@ -105,7 +39,7 @@ class FunSetSuite extends FunSuite {
     }
   }
 
-  test("union contains all elements of each set") {
+  @Test def `union contains all elements of each set`: Unit = {
     new TestSets {
       val s = union(s1, s2)
       assert(contains(s, 1), "Union 1")
@@ -114,28 +48,29 @@ class FunSetSuite extends FunSuite {
     }
   }
 
-  test("forall works") {
-    new TestSets {
-      assert(forall(sEven, (x) => x % 2 == 0), "Forall even")
-      assert(forall(sOdd, (x) => x % 2 != 0), "Forall odd")
-      assert(!forall(sOdd, (x) => x % 2 == 0), "Forall odd fail")
-      assert(!forall(sEven, (x) => x % 2 != 0), "Forall even fail")
-      assert(!forall(notLessThanFive, (x) => x < 5), "Forall less than five")
-    }
-  }
+  @Rule def individualTestTimeout = new org.junit.rules.Timeout(10 * 1000)
 
-  test("exists works") {
-    new TestSets {
-      assert(exists(sEvenWithOneOdd, (x) => x % 2 != 0), "Exists odd between evens")
-      assert(exists(sOddWithOneEven, (x) => x % 2 == 0), "Exists even between odds")
-    }
+  /**
+    * When writing tests, one would often like to re-use certain values for multiple
+    * tests. For instance, we would like to create an Int-set and have multiple test
+    * about it.
+    *
+    * Instead of copy-pasting the code for creating the set into every test, we can
+    * store it in the test class using a val:
+    *
+    * val s1 = singletonSet(1)
+    *
+    * However, what happens if the method "singletonSet" has a bug and crashes? Then
+    * the test methods are not even executed, because creating an instance of the
+    * test class fails!
+    *
+    * Therefore, we put the shared values into a separate trait (traits are like
+    * abstract classes), and create an instance inside each test method.
+    *
+    */
+  trait TestSets {
+    val s1 = singletonSet(1)
+    val s2 = singletonSet(2)
+    val s3 = singletonSet(3)
   }
-
-  test("map works") {
-    new TestSets {
-      assert(FunSets.toString(map(sEven, (x => x * 2))) == FunSets.toString(sEvenDuplicated), "sEven duplicated")
-      assert(FunSets.toString(map(sOdd, (x => x * 2))) == FunSets.toString(sOddDuplicated), "sOdd duplicated")
-    }
-  }
-
 }

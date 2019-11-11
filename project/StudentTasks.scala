@@ -1,60 +1,85 @@
-import sbt._
-import Keys._
-import Settings._
+package ch.epfl.lamp
 
-import java.io.{File, IOException, FileInputStream}
+import java.io.{File, FileInputStream, IOException}
+
 import org.apache.commons.codec.binary.Base64
-
-import scala.util.parsing.json.JSON
+import play.api.libs.json.{JsObject, JsPath, Json}
+import sbt.Keys._
+import sbt._
+import scalafix.sbt.ScalafixPlugin.autoImport._
 import scalaj.http._
 
-import scala.util.{Try, Success, Failure}
+import scala.util.{Failure, Success, Try}
 
-case class AssignmentInfo(
-  key: String,
-  itemId: String,
-  premiumItemId: Option[String],
-  partId: String,
-  styleSheet: Option[File => File]
-)
-
-case class MapMapString (map: Map[String, Map[String, String]])
 /**
-  * Note: keep this class concrete (i.e., do not convert it to abstract class or trait).
+  * Provides tasks for submitting the assignment
   */
-class StudentBuildLike protected() extends CommonBuild {
-
-  val assignmentInfo = SettingKey[AssignmentInfo]("assignmentInfo")
-
-  lazy val root = project.in(file(".")).settings(
-    submitSetting,
-    submitLocalSetting,
-    commonSourcePackages := Seq(), // see build.sbt
-    styleCheckSetting,
-    libraryDependencies += scalaTestDependency
-  ).settings(packageSubmissionFiles: _*)
+object StudentTasks extends AutoPlugin {
 
   /** **********************************************************
     * SUBMITTING A SOLUTION TO COURSERA
     */
-
-  val packageSubmission = TaskKey[File]("packageSubmission")
-
-  val sourceMappingsWithoutPackages = Def.task {
-    val _ = (compile in Test).value
-    val srcs = unmanagedSources.value
-    val sdirs = unmanagedSourceDirectories.value
-    val base = baseDirectory.value
-    val allFiles = srcs --- sdirs --- base
-    val commonSourcePaths = commonSourcePackages.value.map(scalaSource.value / _).map(_.getPath)
-    val withoutCommonSources = allFiles.filter(f => !commonSourcePaths.exists(f.getPath.startsWith))
-    withoutCommonSources pair (relativeTo(sdirs) | relativeTo(base) | flat)
+  val packageSubmissionZipSettings = Seq(
+    packageSubmissionZip := {
+      val submission = crossTarget.value / "submission.zip"
+      val sources = (packageSourcesOnly in Compile).value
+      val binaries = (packageBinWithoutResources in Compile).value
+      IO.zip(Seq(sources -> "sources.zip", binaries -> "binaries.jar"), submission)
+      submission
+    },
+    artifactClassifier in packageSourcesOnly := Some("sources"),
+    artifact in (Compile, packageBinWithoutResources) ~= (art => art.withName(art.name + "-without-resources"))
+  ) ++
+    inConfig(Compile)(
+      Defaults.packageTaskSettings(packageSourcesOnly, Defaults.sourceMappings) ++
+        Defaults.packageTaskSettings(
+          packageBinWithoutResources,
+          Def.task {
+            val relativePaths =
+              (unmanagedResources in Compile).value
+                .flatMap(Path.relativeTo((unmanagedResourceDirectories in Compile).value)(_))
+            (mappings in (Compile, packageBin)).value.filterNot { case (_, path) => relativePaths.contains(path) }
+          }
+        )
+    )
+  val maxSubmitFileSize = {
+    val mb = 1024 * 1024
+    10 * mb
   }
 
-  val packageSubmissionFiles = {
-    // in the packageSubmission task we only use the sources of the assignment and not the common sources. We also do not package resources.
-    inConfig(Compile)(Defaults.packageTaskSettings(packageSubmission, sourceMappingsWithoutPackages))
+  import MOOCSettings.autoImport._
+  import autoImport._
+
+  /** Task to submit a solution to coursera */
+  val submit = inputKey[Unit]("submit solution to Coursera")
+
+  override lazy val projectSettings = Seq(
+    // Run scalafix linting in parallel with the tests
+    (test in Test) := {
+      scalafixLinting.value
+      (test in Test).value
+    },
+    packageSubmissionSetting,
+    submitSetting,
+    fork := true,
+    connectInput in run := true,
+    outputStrategy := Some(StdoutOutput),
+    scalafixConfig := {
+      val scalafixDotConf = (baseDirectory.value / ".scalafix.conf")
+      if (scalafixDotConf.exists) Some(scalafixDotConf) else None
+    }
+  ) ++ packageSubmissionZipSettings
+  // Run scalafix linting after compilation to avoid seeing parser errors twice
+  // Keep in sync with the use of scalafix in Grader
+  // (--exclude doesn't work (https://github.com/lampepfl-courses/moocs/pull/28#issuecomment-427894795)
+  //  so we customize unmanagedSources below instead)
+  private val scalafixLinting = Def.taskDyn {
+    if (new File(".scalafix.conf").exists()) {
+      (scalafix in Compile).toTask(" --check").dependsOn(compile in Compile)
+    } else Def.task(())
   }
+
+  override def requires = super.requires && MOOCSettings
 
   /** Check that the jar exists, isn't empty, isn't crazy big, and can be read
     * If so, encode jar as base64 so we can send it to Coursera
@@ -69,9 +94,10 @@ class StudentBuildLike protected() extends CommonBuild {
       s.log.error(errPrefix + "jar archive is empty\n" + jar.getAbsolutePath)
       failSubmit()
     } else if (fileLength > maxSubmitFileSize) {
-      s.log.error(errPrefix + "jar archive is too big. Allowed size: " +
-        maxSubmitFileSize + " bytes, found " + fileLength + " bytes.\n" +
-        jar.getAbsolutePath)
+      s.log.error(
+        errPrefix + "jar archive is too big. Allowed size: " +
+          maxSubmitFileSize + " bytes, found " + fileLength + " bytes.\n" +
+          jar.getAbsolutePath)
       failSubmit()
     } else {
       val bytes = new Array[Byte](fileLength.toInt)
@@ -92,35 +118,42 @@ class StudentBuildLike protected() extends CommonBuild {
     }
   }
 
-  /** Task to submit solution locally to a given file path */
-  val submitLocal = inputKey[Unit]("submit local to a given file path")
-  lazy val submitLocalSetting = submitLocal := {
-    val args: Seq[String] = Def.spaceDelimited("<arg>").parsed
+  /** Task to package solution to a given file path */
+  lazy val packageSubmissionSetting = packageSubmission := {
+    // Fail if scalafix linting does not pass.
+    scalafixLinting.value
+
+    val args: Seq[String] = Def.spaceDelimited("[path]").parsed
     val s: TaskStreams = streams.value // for logging
-    val jar = (packageSubmission in Compile).value
+    val jar = (packageSubmissionZip in Compile).value
 
     val base64Jar = prepareJar(jar, s)
-    args match {
-      case path :: Nil =>
-        scala.tools.nsc.io.File(path).writeAll(base64Jar)
-      case _ =>
-        val inputErr =
-          s"""|Invalid input to `submitLocal`. The required syntax for `submitLocal` is:
-              |submitLocal <path>
-          """.stripMargin
-        s.log.error(inputErr)
-        failSubmit()
-    }
+
+    val path = args.headOption.getOrElse((baseDirectory.value / "submission.jar").absolutePath)
+    scala.tools.nsc.io.File(path).writeAll(base64Jar)
   }
 
-  /** Task to submit a solution to coursera */
-  val submit = inputKey[Unit]("submit")
+  object autoImport {
+    val packageSourcesOnly = TaskKey[File]("packageSourcesOnly", "Package the sources of the project")
+    val packageBinWithoutResources =
+      TaskKey[File]("packageBinWithoutResources", "Like packageBin, but without the resources")
+
+    val packageSubmissionZip = TaskKey[File]("packageSubmissionZip")
+
+    val packageSubmission = inputKey[Unit]("package solution as an archive file")
+  }
   lazy val submitSetting = submit := {
+    // Fail if scalafix linting does not pass.
+    scalafixLinting.value
+
     val args: Seq[String] = Def.spaceDelimited("<arg>").parsed
     val s: TaskStreams = streams.value // for logging
-    val jar = (packageSubmission in Compile).value
+    val jar = (packageSubmissionZip in Compile).value
 
-    val assignmentDetails = assignmentInfo.value
+    val assignmentDetails =
+      courseraId.?.value.getOrElse(
+        throw new MessageOnlyException(
+          "This assignment can not be submitted to Coursera because the `courseraId` setting is undefined"))
     val assignmentKey = assignmentDetails.key
     val courseName =
       course.value match {
@@ -144,13 +177,11 @@ class StudentBuildLike protected() extends CommonBuild {
               |The submit token is NOT YOUR LOGIN PASSWORD.
               |It can be obtained from the assignment page:
               |https://www.coursera.org/learn/$courseName/programming/$itemId
-              |${
-                premiumItemId.fold("") { id =>
-                  s"""or (for premium learners):
+              |${premiumItemId.fold("") { id =>
+               s"""or (for premium learners):
                      |https://www.coursera.org/learn/$courseName/programming/$id
                    """.stripMargin
-                }
-              }
+             }}
           """.stripMargin
         s.log.error(inputErr)
         failSubmit()
@@ -176,10 +207,12 @@ class StudentBuildLike protected() extends CommonBuild {
         ("Content-Type", "application/json")
       )
       s.log.info("Connecting to Coursera...")
-      val response = Try(http.postData(data)
-                         .headers(hs)
-                         .option(HttpOptions.connTimeout(10000)) // scalaj default timeout is only 100ms, changing that to 10s
-                         .asString) // kick off HTTP POST
+      val response = Try(
+        http
+          .postData(data)
+          .headers(hs)
+          .option(HttpOptions.connTimeout(10000)) // scalaj default timeout is only 100ms, changing that to 10s
+          .asString) // kick off HTTP POST
       response
     }
 
@@ -201,7 +234,7 @@ class StudentBuildLike protected() extends CommonBuild {
           "learnerMessage": "Invalid email or token."
         }
       }
-      */
+       */
 
       // Success, Coursera responds with 2xx HTTP status code
       if (response.is2xx) {
@@ -212,23 +245,21 @@ class StudentBuildLike protected() extends CommonBuild {
               |
                 |You can see how you scored by going to:
               |https://www.coursera.org/learn/$courseName/programming/$itemId/
-              |${
-            premiumItemId.fold("") { id =>
-              s"""or (for premium learners):
+              |${premiumItemId.fold("") { id =>
+               s"""or (for premium learners):
                  |https://www.coursera.org/learn/$courseName/programming/$id
                        """.stripMargin
-            }
-          }
+             }}
               |and clicking on "My Submission".""".stripMargin
         s.log.info(successfulSubmitMsg)
       }
 
       // Failure, Coursera responds with 4xx HTTP status code (client-side failure)
       else if (response.is4xx) {
-        val result = JSON.parseFull(respBody)
+        val result = Try(Json.parse(respBody)).toOption
         val learnerMsg = result match {
-          case Some(resp: MapMapString) => // MapMapString to get around erasure
-            resp.map("details")("learnerMessage")
+          case Some(resp: JsObject) =>
+            (JsPath \ "details" \ "learnerMessage").read[String].reads(resp).get
           case Some(x) => // shouldn't happen
             "Could not parse Coursera's response:\n" + x
           case None =>
@@ -286,26 +317,4 @@ class StudentBuildLike protected() extends CommonBuild {
     */
   def encodeBase64(bytes: Array[Byte]): String =
     new String(Base64.encodeBase64(bytes))
-
-
-  /** *****************************************************************
-    * RUNNING WEIGHTED SCALATEST & STYLE CHECKER ON DEVELOPMENT SOURCES
-    */
-
-  val styleCheck = TaskKey[Unit]("styleCheck")
-  val styleCheckSetting = styleCheck := {
-    val (_, sourceFiles, info, assignmentName) = ((compile in Compile).value, (sources in Compile).value, assignmentInfo.value, assignment.value)
-    val styleSheet = info.styleSheet
-    val logger = streams.value.log
-    styleSheet match {
-      case None     => logger.warn("Can't check style: there is no style sheet provided.")
-      case Some(ss) =>
-        val (feedback, score) = StyleChecker.assess(sourceFiles, ss(baseDirectory.value).getPath)
-        logger.info(
-          s"""|$feedback
-              |Style Score: $score out of ${StyleChecker.maxResult}""".stripMargin)
-
-    }
-  }
-
 }
